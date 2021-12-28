@@ -1,0 +1,1747 @@
+---
+title: "FDI Determinants Model"
+author: "Damian Żamojda 386905"
+date: "1/04/2021"
+output:
+  html_document: 
+    keep_md: yes
+---
+# Libraries
+
+```{r message=FALSE, results='hide', warning=FALSE}
+rm(list=ls())
+library(tidyverse)
+library(ggplot2)
+library(ggExtra)
+library(here)
+library(plm)
+library(lmtest)
+library(Hmisc)
+library(corrplot)
+library(readr)
+library(treemapify)
+library(broom)
+library(kableExtra)
+library(hrbrthemes)
+
+library(pvclust)
+library(ggpubr)
+library(factoextra)
+library(viridis)
+library(fpc)
+
+library(SHAPforxgboost)
+library(xgboost)
+library(data.table)
+library(caTools)
+library(caret)
+library(tseries)
+
+library(sjPlot)
+library(sjmisc)
+library(corrplot) 
+library(Hmisc)
+```
+
+# Data Overview and outlier reduction
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+Data <- read_csv(here("Processed_Data", "FDI_Dataset.csv"))
+Data <- Data[,2:31]
+Data$Status <- as.factor(Data$Status)
+Data$Exe_respect_constitution_cat <- as.factor(Data$Exe_respect_constitution_cat)
+Data$FDI <- Data$FDI/Data$GDP
+Data$num <- rownames(Data)
+#Responses: 
+#1: Free.
+#2: Partly Free. 
+#3: Not Free.
+table(Data$Year)
+sapply(Data, function(x) sum(is.na(x)))
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+set.seed(12345)
+# Ward Hierarchical Clustering with Bootstrapped p values
+Data_clust <- Data %>% select(c(GDP_growth, GDP_p_capita, Pop, Trade_op, FiskalStatus, Country, Year, FDI, Exe_respect_constitution, P_rights, Civil_liberties, RuleOfLaw,Party_institut_idx)) %>% na.omit(GDP_growth, GDP_p_capita, Pop, Trade_op,Party_institut_idx)
+
+# log() values
+Data_clust$GDP_p_capita <- log(Data_clust$GDP_p_capita)
+Data_clust$Trade_op <- log(Data_clust$Trade_op)
+Data_clust$Pop <- log(Data_clust$Pop)
+
+#Scalling
+Data_clust$GDP_growth_Scaled <- scale(Data_clust$GDP_growth)
+Data_clust$GDP_p_capita_Scaled <- scale(Data_clust$GDP_p_capita)
+Data_clust$Pop_Scaled <- scale(Data_clust$Pop)
+Data_clust$Trade_op_Scaled <- scale(Data_clust$Trade_op)
+Data_clust$Party_institut_idx_Scaled <- scale(Data_clust$Party_institut_idx)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# No. of clusters
+fviz_nbclust(Data_clust[,14:18], FUNcluster=kmeans, method = "silhouette") + theme_minimal()
+fviz_nbclust(Data_clust[,14:18], FUNcluster=kmeans, method = "wss") + theme_minimal()
+fviz_nbclust(Data_clust[,14:18], FUNcluster=kmeans, method = "gap_stat") + theme_minimal()
+
+my_vector <- vector("numeric", 10L)
+for(i in 2:10) {
+  clusters1<-kmeans(Data_clust[,14:18], 3) 
+  my_vector[i] <- round(calinhara(Data_clust[,14:18],clusters1$cluster),digits=2)
+}
+ggplot(data_frame(my_vector), aes(x=seq(1,10,1), y=my_vector)) +
+  geom_line() +
+  labs(title="Ptimal number of clusters", x="Number of clusters k", y = "Calinski-Harabasz Index") + 
+  geom_vline(xintercept = 3, linetype="dotted", color = "blue") + 
+  scale_x_discrete(limits=seq(1,10,1)) +
+  theme_minimal()  
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# Kmeans
+clusters1<-kmeans(Data_clust[,14:18], 3)
+
+# Plot
+fviz_cluster(clusters1, Data_clust[,14:18])
+```
+
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+#Visualization
+Data_clust %>%
+  as_tibble() %>%
+  mutate(cluster = clusters1$cluster) %>%
+  ggplot(aes(GDP_growth, GDP_p_capita, color = factor(cluster), shape = factor(FiskalStatus))) +
+  geom_point()
+
+Data_clust %>%
+  as_tibble() %>%
+  mutate(cluster = clusters1$cluster) -> Data_clust
+
+Data_clust %>%
+  group_by(FiskalStatus, cluster) %>%
+  summarise(n = n()) -> Data.agg.clust
+
+ggplot(Data.agg.clust, aes(x = FiskalStatus, y = cluster)) +
+  geom_tile(aes(fill = n), color = 'white', show.legend = F) +
+  theme_minimal() + 
+  geom_text(aes(label = n), size = 5, fontface = 'bold', color = 'white') +
+  labs(title = 'Table 1. Country Status Distribution') +
+  theme(panel.grid = element_blank())
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+Data_clust %>% group_by(FiskalStatus) %>%
+  select(FDI, Year) %>%
+  summarise(Min = round(min(FDI),2),
+            '1st Qu.' = round(quantile(FDI, 0.25),2),
+            Median = round(median(FDI),2),
+            Mean = round(mean(FDI),2),
+            '3rd Qu.' = round(quantile(FDI, 0.75),2),
+            Max = round(max(FDI),2),
+            Std = round(sd(FDI),2),
+            Count = n(),
+            'Years (Min-Max)'= paste0(as.character(min(Year)), "-",as.character(max(Year)))) -> FDI_stats
+FDI_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table1.html",
+             zoom = 2)
+
+Data_clust %>% group_by(cluster) %>%
+  select(FDI, Year) %>%
+  summarise(Min = round(min(FDI),2),
+            '1st Qu.' = round(quantile(FDI, 0.25),2),
+            Median = round(median(FDI),2),
+            Mean = round(mean(FDI),2),
+            '3rd Qu.' = round(quantile(FDI, 0.75),2),
+            Max = round(max(FDI),2),
+            Std = round(sd(FDI),2),
+            Count = n(),
+            'Years (Min-Max)'= paste0(as.character(min(Year)), "-",as.character(max(Year)))) -> FDI_stats
+FDI_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table2.html",
+             zoom = 2)
+```
+
+# After outlier analysis and removal
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# 51 UFO Outliers
+Data <- filter(Data_clust, (FiskalStatus == "Advanced" & cluster == 1) == FALSE)
+Data <- Data[,c(1:13,19)]
+colnames(Data) <- c("GDP_growth", "GDP_p_capita_log", "Pop_log", "Trade_op_log", "FiskalStatus", "Country", "Year", "FDI", "Exe_respect_constitution", "P_rights", "Civil_liberties", "RuleOfLaw", "Party_institut_idx", "cluster")
+Data$num <- rownames(Data)
+
+#Visualization
+Data %>%
+  group_by(FiskalStatus, cluster) %>%
+  summarise(n = n()) -> Data.agg.clust
+
+ggplot(Data.agg.clust, aes(x = FiskalStatus, y = cluster)) +
+  geom_tile(aes(fill = n), color = 'white', show.legend = F) +
+  theme_minimal() + 
+  geom_text(aes(label = n), size = 5, fontface = 'bold', color = 'white') +
+  theme(panel.grid = element_blank())
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+Data %>% group_by(FiskalStatus) %>%
+  select(FDI, Year) %>%
+  summarise(Min = round(min(FDI),2),
+            '1st Qu.' = round(quantile(FDI, 0.25),2),
+            Median = round(median(FDI),2),
+            Mean = round(mean(FDI),2),
+            '3rd Qu.' = round(quantile(FDI, 0.75),2),
+            Max = round(max(FDI),2),
+            Std = round(sd(FDI),2),
+            Count = n(),
+            'Years (Min-Max)'= paste0(as.character(min(Year)), "-",as.character(max(Year)))) -> FDI_stats
+FDI_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table3.html",
+             zoom = 2)
+
+Data %>% group_by(cluster) %>%
+  select(FDI, Year) %>%
+  summarise(Min = round(min(FDI),2),
+            '1st Qu.' = round(quantile(FDI, 0.25),2),
+            Median = round(median(FDI),2),
+            Mean = round(mean(FDI),2),
+            '3rd Qu.' = round(quantile(FDI, 0.75),2),
+            Max = round(max(FDI),2),
+            Std = round(sd(FDI),2),
+            Count = n(),
+            'Years (Min-Max)'= paste0(as.character(min(Year)), "-",as.character(max(Year)))) -> FDI_stats
+FDI_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table4.html",
+             zoom = 2)
+```
+
+
+# Sampling
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+unique(Data$Country)
+unique(Data$Year)
+# Advanced
+Advanced_data <- filter(Data, FiskalStatus == "Advanced")
+# Emerging
+Emerging_data <- filter(Data, FiskalStatus == "Emerging")
+# Low-Income
+LowIncome_data <- filter(Data, FiskalStatus == "Low-income")
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+Data$Fiscal_Status <- Data$FiskalStatus
+Data %>% group_by(Fiscal_Status, Year) %>%
+  summarise(FDI = mean(FDI)) %>%
+  ggplot(aes(x= Year, y= FDI, color=Fiscal_Status)) +
+  geom_line() +
+  labs(y = 'FDI/GDP') +
+  theme_minimal()
+
+Data %>% group_by(Fiscal_Status, Year) %>%
+  summarise(Exe_respect_constitution = mean(Exe_respect_constitution)) %>%
+  ggplot(aes(x= Year, y= Exe_respect_constitution, color=Fiscal_Status)) +
+  geom_line() +
+  labs(y = 'Executives respects constitution') +
+  theme_minimal()
+
+Data %>% group_by(Fiscal_Status, Year) %>%
+  summarise(Party_institut_idx = mean(Party_institut_idx)) %>%
+  ggplot(aes(x= Year, y= Party_institut_idx, color=Fiscal_Status)) +
+  geom_line() +
+  labs(y = 'Party institutionalisation index') +
+  theme_minimal()
+
+Data %>% group_by(FiskalStatus, Year) %>%
+  summarise(Trade_op_log = mean(Trade_op_log)) %>%
+  ggplot(aes(x= Year, y= Trade_op_log, color=FiskalStatus)) +
+  geom_line() +
+  labs(y = 'Trade Openness') +
+  theme_minimal()
+
+Data %>% group_by(FiskalStatus, Year) %>%
+  summarise(RuleOfLaw = mean(RuleOfLaw)) %>%
+  ggplot(aes(x= Year, y= RuleOfLaw, color=FiskalStatus)) +
+  geom_line() +
+  labs(y = 'Rule Of Law') +
+  theme_minimal()
+
+Data %>% group_by(FiskalStatus, Year) %>%
+  summarise(Civil_liberties = mean(Civil_liberties)) %>%
+  ggplot(aes(x= Year, y= Civil_liberties, color=FiskalStatus)) +
+  geom_line() +
+  labs(y = 'Civil_liberties') +
+  theme_minimal()
+```
+
+# Advanced Countries
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+variables <- c("GDP_growth", "GDP_p_capita_log", "Pop_log", "P_rights", "Trade_op_log", "FDI", "Exe_respect_constitution", "Civil_liberties", "RuleOfLaw", "Year", "Party_institut_idx")
+Advanced_data %>% select(variables, Country) %>% drop_na() %>% data.frame() -> stat_data
+stat_data$FDI <- stat_data$FDI
+stat_data %>% group_by(Country) %>%
+  select(FDI, Year) %>%
+  summarise(Min = round(min(FDI),2),
+            '1st Qu.' = round(quantile(FDI, 0.25),2),
+            Median = round(median(FDI),2),
+            Mean = round(mean(FDI),2),
+            '3rd Qu.' = round(quantile(FDI, 0.75),2),
+            Max = round(max(FDI),2),
+            Std = round(sd(FDI),2),
+            Count = n(),
+            'Years (Min-Max)'= paste0(as.character(min(Year)), "-",as.character(max(Year)))) -> FDI_stats
+
+
+
+FDI_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table5.html",
+             zoom = 2)
+
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+FDI_stats %>%
+  mutate(Country = reorder(Country, Max)) %>%
+  ggplot() +
+  geom_segment( aes(x=Country, xend=Country, y=Min, yend=Max), color="grey") +
+  geom_point( aes(x=Country, y=Min), color=rgb(0.2,0.7,0.1,0.5), size=3 ) +
+  geom_point( aes(x=Country, y=Max), color=rgb(0.7,0.2,0.1,0.5), size=3 ) +
+  coord_flip()+
+  theme_ipsum() +
+  theme(
+    legend.position = "none",
+  ) +
+  xlab("") +
+  ylab("Share of FDI in GDP")+
+  scale_y_continuous(breaks=c(seq(0, 3,0.5)))+
+  theme_minimal()
+```
+
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+data_corr <- Advanced_data %>% select(variables) %>% select(-Year) %>% drop_na()
+nums <- unlist(lapply(data_corr, is.numeric)) 
+
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+cor.mtest <- function(mat) {
+    mat <- as.matrix(mat)
+    n <- ncol(mat)
+    p.mat<- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+        for (j in (i + 1):n) {
+            tmp <- cor.test(mat[, i], mat[, j])
+            p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+        }
+    }
+  colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+  p.mat
+}
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+M <- data_corr[, nums]
+colnames(M) <- c("GDP growth rate", "log(GDP per capita)","log(Population)","Property rights","log(Trade openness)","FDI", "Executive respects constitution","Civil Liberties","Rule of Law","Party institutionalization index")
+res <- cor(M)
+p.mat <- cor.mtest(M)
+
+png('corr_plot1.png', width = 880, height = 880)
+
+corrplot(res, is.corr = FALSE, method="color", col=col(200),
+         type="upper", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         p.mat = p.mat, sig.level = c(0.01), insig = 'blank', 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+
+dev.off()
+```
+
+## Panel Model
+
+### Exe_respect_constitution Clustering
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+set.seed(1234567890)
+Data_Advanced_clust <- Advanced_data %>% select(c(Exe_respect_constitution)) %>% scale()
+
+fviz_nbclust(Data_Advanced_clust, FUNcluster=kmeans, method = "silhouette") + theme_minimal()
+fviz_nbclust(Data_Advanced_clust, FUNcluster=kmeans, method = "wss") + theme_minimal()
+fviz_nbclust(Data_Advanced_clust, FUNcluster=kmeans, method = "gap_stat") + theme_minimal()
+
+my_vector <- vector("numeric", 10L)
+for(i in 2:10) {
+  clusters1<-kmeans(Data_Advanced_clust, 3) 
+  my_vector[i] <- round(calinhara(Data_Advanced_clust,clusters1$cluster),digits=2)
+}
+ggplot(data_frame(my_vector), aes(x=seq(1,10,1), y=my_vector)) +
+  geom_line() +
+  labs(title="Optimal number of clusters",
+       x="Number of clusters k", y = "Calinski-Harabasz Index") + 
+  geom_vline(xintercept = 3, linetype="dotted", color = "blue") + 
+  scale_x_discrete(limits=seq(1,10,1)) +
+  theme_minimal()  
+
+clusters1<-kmeans(Data_Advanced_clust, 3) # 3 clusters final
+
+Advanced_data$Exe_clust<-rep(0, times=dim(Advanced_data)[1])
+Advanced_data$Exe_clust[clusters1$cluster==1]<-1
+Advanced_data$Exe_clust[clusters1$cluster==2]<-2
+Advanced_data$Exe_clust[clusters1$cluster==3]<-3
+
+clusters_stats <- cbind(Advanced_data$Exe_respect_constitution[clusters1$cluster==1],
+                        Advanced_data$Exe_respect_constitution[clusters1$cluster==2],
+                        Advanced_data$Exe_respect_constitution[clusters1$cluster==3])
+colnames(clusters_stats) <- c("Cluster 1", "Cluster 2", "Cluster 3")
+summary(clusters_stats)
+Advanced_data$Exe_clust <- ordered(Advanced_data$Exe_clust, c("1","2", "3"))
+
+plot_cluster <- cbind(Advanced_data$Exe_respect_constitution, clusters1$cluster)
+colnames(plot_cluster) <- c("Exe_respect_constitution", "Cluster")
+
+ggplot(as.data.frame(plot_cluster),  aes(Exe_respect_constitution, Cluster, color=factor(Cluster))) +
+  geom_point() +
+  labs(title="Clusters Plot - Advanced Countries",
+       x="Exe_respect_constitution", y = "Cluster's No.") +
+  scale_y_discrete(limits=seq(1,3,1)) +
+  theme_minimal() +
+  theme(legend.position = "none")
+table(Advanced_data$Exe_clust)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+as.data.frame(Advanced_data) %>% mutate(Cluster = Exe_clust) %>%
+  group_by(Cluster) %>%
+  summarise(Min = round(min(Exe_respect_constitution),4),
+            '1st Qu.' = round(quantile(Exe_respect_constitution, 0.25),4),
+            Median = round(median(Exe_respect_constitution),4),
+            Mean = round(mean(Exe_respect_constitution),4),
+            '3rd Qu.' = round(quantile(Exe_respect_constitution, 0.75),4),
+            Max = round(max(Exe_respect_constitution),4),
+            Std = round(sd(Exe_respect_constitution),4),
+            Count = n()) -> Exe_stats
+Exe_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table1exe.html",
+             zoom = 2)
+```
+### model 1
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + P_rights
+
+fixed <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  Advanced_model1 <- random} else{
+    Advanced_model1 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+
+summary(Advanced_model1)
+
+# Fixed effects test
+Test_table1_Advanced <- tidy(pFtest(fixed, pooled))
+# Hausman Test
+Test_table2_Advanced <- tidy(phtest(fixed,random))
+
+rm(random, fixed, x, pooled)  
+```
+
+### model 2
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + Exe_clust
+
+fixed <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  Advanced_model2 <- random} else{
+    Advanced_model2 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(Advanced_model2)
+
+# Fixed effects test
+Test_table1_Advanced <- rbind(Test_table1_Advanced, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_Advanced <- rbind(Test_table2_Advanced, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### model 3
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + RuleOfLaw
+
+fixed <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  Advanced_model3 <- random} else{
+    Advanced_model3 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+
+summary(Advanced_model3)
+
+# Fixed effects test
+Test_table1_Advanced <- rbind(Test_table1_Advanced, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_Advanced <- rbind(Test_table2_Advanced, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### model 4
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + Civil_liberties
+
+fixed <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  Advanced_model4 <- random} else{
+    Advanced_model4 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(Advanced_model4)
+
+# Fixed effects test
+Test_table1_Advanced <- rbind(Test_table1_Advanced, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_Advanced <- rbind(Test_table2_Advanced, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+
+### model 5
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ lag(log(FDI)) + lag(log(FDI), 2) + GDP_growth + GDP_p_capita_log + Party_institut_idx + Pop_log + Trade_op_log
+
+fixed <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Advanced_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  Advanced_model5 <- random} else{
+    Advanced_model5 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(Advanced_model5)
+
+# Fixed effects test
+Test_table1_Advanced <- rbind(Test_table1_Advanced, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_Advanced <- rbind(Test_table2_Advanced, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### Panel Summary
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+var_labels <- c(
+  GDP_growth = "GDP growth rate",
+  'GDP_p_capita_log' = "log(GDP per capita)",
+  'Pop_log' = "log(Population)",
+  'Trade_op_log' = "log(Trade openness)",
+  P_rights = "Property rights", 
+  Exe_clust = "Clustered Executive respects constitution",
+  RuleOfLaw = "Rule of Law",
+  Civil_liberties = "Civil Liberties",
+  Party_institut_idx = "Party institutionalization index",
+  Exe_clust.L = "Executive respects constitution .L",
+  Exe_clust.Q = "Executive respects constitution .Q",
+  'lag(log(FDI))' = "Lagged log(FDI) t-1",
+  'lag(log(FDI), 2)' = "Lagged log(FDI) t-2"
+)
+
+tab_model(Advanced_model1, Advanced_model2, Advanced_model3, Advanced_model4, Advanced_model5,
+          dv.labels = c("Model 1", "Model 2", "Model 3", "Model 4", "Model 5"),
+          pred.labels = var_labels,
+          show.ci = FALSE,
+          p.style = "stars")
+```
+
+## XGBoost
+
+### Sampling
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+variables <- c("GDP_growth", "GDP_p_capita_log", "Pop_log", "P_rights", "Trade_op_log", "FDI", "Exe_respect_constitution", "Exe_clust", "Party_institut_idx")
+
+sample = sample.split(Advanced_data$num, SplitRatio = .8)
+Advanced_train = subset(Advanced_data, sample == TRUE)
+Advanced_test  = subset(Advanced_data, sample == FALSE)
+dim(Advanced_train)
+dim(Advanced_test)
+```
+
+### Training 
+
+Process starts with min_child_weight spectrum: c(10, 25, 50, 100, 150, 200, 500) and then respectively max_depth = seq(4,8,1); colsample_bytree = seq(0.1, 1, 0.1); subsample = c(0.6, 0.7, 0.75, 0.8, 0.85, 0.9); nrounds = seq(10,80,10).
+
+### Model
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+set.seed(123456789)
+
+y_var <-  "FDI"
+dataX <- as.matrix(cbind(Advanced_train[,c(1:4,13)], as.numeric(Advanced_train$Exe_clust)))
+colnames(dataX) <- c("GDP_growth","GDP_p_capita_log","Pop_log", "Trade_op_log","Party_institut_idx","Exe_clust")
+
+param_list <- list(objective = "reg:squarederror",  # For regression
+                   eta = 0.05,
+                   max_depth = 6,
+                   gamma = 0,
+                   colsample_bytree = 0.8,
+                   min_child_weight = 10,
+                   subsample = 0.6
+                   )
+
+mod <- xgboost::xgboost(data = dataX, 
+                        label = as.matrix(Advanced_train[[y_var]]), 
+                        params = param_list, nrounds = 2)
+xgb.dump(mod)
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+shap_values <- shap.values(xgb_model = mod, X_train = dataX)
+shap_values$mean_shap_score %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table6.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+shap_data <- copy(shap_values$shap_score)
+shap_data[, BIAS := shap_values$BIAS0]
+pred_mod <- predict(mod, dataX, ntreelimit = 10)
+shap_data[, `:=`(rowSum = round(rowSums(shap_data),6), pred_mod = round(pred_mod,6))]
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# To prepare the long-format data:
+shap_long <- shap.prep(shap_contrib = shap_values$shap_score, X_train = dataX)
+
+# **SHAP summary plot**
+shap.plot.summary(shap_long, scientific = FALSE)
+
+plot_shap <- cbind(Advanced_data$Party_institut_idx, shap_values$shap_score$Party_institut_idx)
+colnames(plot_shap) <- c("Party_institut_idx", "Shap_score")
+ggplot(as.data.frame(plot_shap),  aes(Party_institut_idx, Shap_score, color=Party_institut_idx)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title="SHAP Plot - Advanced Countries",
+       x="Party_institut_idx", y = "Shap_score") +
+  theme_minimal()
+
+plot_shap <- cbind(Advanced_data$Exe_clust,
+                   shap_values$shap_score$Exe_clust)
+colnames(plot_shap) <- c("Exe_clust", "Shap_score")
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+plot_shap <- cbind(Advanced_data$Exe_clust,
+                   shap_values$shap_score$Exe_clust,
+                   Advanced_data$Exe_respect_constitution)
+colnames(plot_shap) <- c("Exe_clust", "Shap_score", "Exe_respect_constitution")
+
+ggplot(as.data.frame(plot_shap),  aes(Exe_respect_constitution, Shap_score, color=Exe_respect_constitution, shape=ordered(Exe_clust, c("3","2", "1")))) +
+  geom_point() +
+  geom_smooth() +
+  labs(title="SHAP Plot - Advanced Countries",
+       x="Exe_clust", y = "Shap_score") +
+  theme_minimal() -> p
+p3 <- ggMarginal(p, type="boxplot")
+p3 
+```
+
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# choose to show top 4 features by setting `top_n = 6`, 
+# set 4 clustering groups of observations.  
+plot_data <- shap.prep.stack.data(shap_contrib = shap_values$shap_score, top_n = 6, n_groups = 4)
+# you may choose to zoom in at a location, and set y-axis limit using `y_parent_limit`  
+shap.plot.force_plot(plot_data, zoom_in_location = 300)
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+shap.plot.force_plot_bygroup(plot_data)
+```
+
+# Emerging Countries
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+variables <- c("GDP_growth", "GDP_p_capita_log", "Pop_log", "P_rights", "Trade_op_log", "FDI", "Exe_respect_constitution", "Civil_liberties", "RuleOfLaw", "Year", "Party_institut_idx")
+stat_data <- Emerging_data %>% select(variables, Country) %>% drop_na() %>% data.frame()
+stat_data$FDI <- stat_data$FDI
+stat_data %>% group_by(Country) %>%
+  select(FDI, Year) %>%
+  summarise(Min = round(min(FDI),2),
+            '1st Qu.' = round(quantile(FDI, 0.25),2),
+            Median = round(median(FDI),2),
+            Mean = round(mean(FDI),2),
+            '3rd Qu.' = round(quantile(FDI, 0.75),2),
+            Max = round(max(FDI),2),
+            Std = round(sd(FDI),2),
+            Count = n(),
+            'Years (Min-Max)'= paste0(as.character(min(Year)), "-",as.character(max(Year)))) -> FDI_stats
+FDI_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table7.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+FDI_stats %>%
+  mutate(Country = reorder(Country, Max)) %>%
+  ggplot() +
+  geom_segment( aes(x=Country, xend=Country, y=Min, yend=Max), color="grey") +
+  geom_point( aes(x=Country, y=Min), color=rgb(0.2,0.7,0.1,0.5), size=3 ) +
+  geom_point( aes(x=Country, y=Max), color=rgb(0.7,0.2,0.1,0.5), size=3 ) +
+  coord_flip()+
+  theme_ipsum() +
+  theme(
+    legend.position = "none",
+  ) +
+  xlab("") +
+  ylab("Share of FDI in GDP")+
+  scale_y_continuous(breaks=c(seq(0, 4.5,0.5)))+
+  theme_minimal()
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+data_corr <- Emerging_data %>% select(variables) %>% select(-Year) %>% drop_na()
+nums <- unlist(lapply(data_corr, is.numeric))  
+```
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+M <- data_corr[, nums]
+colnames(M) <- c("GDP growth rate", "log(GDP per capita)","log(Population)","Property rights","log(Trade openness)","FDI", "Executive respects constitution","Civil Liberties","Rule of Law","Party institutionalization index")
+res <- cor(M)
+p.mat <- cor.mtest(M)
+
+
+png('corr_plot2.png', width = 880, height = 880)
+
+corrplot(res, is.corr = FALSE, method="color", col=col(200),
+         type="upper", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         p.mat = p.mat, sig.level = c(0.01), insig = 'blank', 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+
+dev.off()
+```
+
+## Panel Model
+
+### Exe_respect_constitution Clustering
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+Data_Emerging_clust <- Emerging_data %>% select(c(Exe_respect_constitution)) %>% scale()
+
+fviz_nbclust(Data_Emerging_clust, FUNcluster=kmeans, method = "silhouette") + theme_minimal()
+fviz_nbclust(Data_Emerging_clust, FUNcluster=kmeans, method = "wss") + theme_minimal()
+fviz_nbclust(Data_Emerging_clust, FUNcluster=kmeans, method = "gap_stat") + theme_minimal()
+
+my_vector <- vector("numeric", 10L)
+for(i in 2:10) {
+  clusters1<-kmeans(Data_Emerging_clust, 3) 
+  my_vector[i] <- round(calinhara(Data_Emerging_clust,clusters1$cluster),digits=2)
+}
+ggplot(data_frame(my_vector), aes(x=seq(1,10,1), y=my_vector)) +
+  geom_line() +
+  labs(title="Optimal number of clusters",
+       x="Number of clusters k", y = "Calinski-Harabasz Index") + 
+  geom_vline(xintercept = 3, linetype="dotted", color = "blue") + 
+  scale_x_discrete(limits=seq(1,10,1)) +
+  theme_minimal()  
+
+clusters1<-kmeans(Data_Emerging_clust, 3) # 3 clusters final
+
+Emerging_data$Exe_clust<-rep(0, times=dim(Emerging_data)[1])
+Emerging_data$Exe_clust[clusters1$cluster==1]<-1
+Emerging_data$Exe_clust[clusters1$cluster==2]<-2
+Emerging_data$Exe_clust[clusters1$cluster==3]<-3
+
+clusters_stats <- cbind(Emerging_data$Exe_respect_constitution[clusters1$cluster==1],
+                        Emerging_data$Exe_respect_constitution[clusters1$cluster==2],
+                        Emerging_data$Exe_respect_constitution[clusters1$cluster==3])
+colnames(clusters_stats) <- c("Cluster 1", "Cluster 2", "Cluster 3")
+summary(clusters_stats)
+Emerging_data$Exe_clust <- ordered(Emerging_data$Exe_clust, c("1","2", "3"))
+
+plot_cluster <- cbind(Emerging_data$Exe_respect_constitution, clusters1$cluster)
+colnames(plot_cluster) <- c("Exe_respect_constitution", "Cluster")
+
+ggplot(as.data.frame(plot_cluster),  aes(Exe_respect_constitution, Cluster, color=factor(Cluster))) +
+  geom_point() +
+  labs(title="Clusters Plot - Emerging Countries",
+       x="Exe_respect_constitution", y = "Cluster's No.") +
+  scale_y_discrete(limits=seq(1,3,1)) +
+  theme_minimal() +
+  theme(legend.position = "none")
+table(Emerging_data$Exe_clust)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+as.data.frame(Emerging_data) %>% mutate(Cluster = Exe_clust) %>%
+  group_by(Cluster) %>%
+  summarise(Min = round(min(Exe_respect_constitution),4),
+            '1st Qu.' = round(quantile(Exe_respect_constitution, 0.25),4),
+            Median = round(median(Exe_respect_constitution),4),
+            Mean = round(mean(Exe_respect_constitution),4),
+            '3rd Qu.' = round(quantile(Exe_respect_constitution, 0.75),4),
+            Max = round(max(Exe_respect_constitution),4),
+            Std = round(sd(Exe_respect_constitution),4),
+            Count = n()) -> Exe_stats
+Exe_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table2exe.html",
+             zoom = 2)
+```
+
+### model 1
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + P_rights
+
+fixed <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "pooling")
+
+# Exception - we decide to use fixed model
+Emerging_model1 <- fixed
+summary(Emerging_model1)
+
+# Fixed effects test
+Test_table1_Emerging <- tidy(pFtest(fixed, pooled))
+# Hausman Test
+Test_table2_Emerging <- tidy(phtest(fixed,random))
+
+rm(random, fixed, x, pooled)    
+```
+
+### model 2
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + Exe_clust
+
+fixed <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "pooling")
+
+# Exception - we decide to use fixed model
+Emerging_model2 <- fixed
+summary(Emerging_model2)
+
+# Fixed effects test
+Test_table1_Emerging <- rbind(Test_table1_Emerging, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_Emerging <- rbind(Test_table2_Emerging, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+
+```
+
+### model 3
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + RuleOfLaw
+
+fixed <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "pooling")
+
+# Exception - we decide to use fixed model
+Emerging_model3 <- fixed
+summary(Emerging_model3)
+
+# Fixed effects test
+Test_table1_Emerging <- rbind(Test_table1_Emerging, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_Emerging <- rbind(Test_table2_Emerging, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### model 4
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + Civil_liberties
+
+fixed <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "pooling")
+
+# Exception - we decide to use fixed model
+Emerging_model4 <- fixed
+summary(Emerging_model4)
+
+# Fixed effects test
+Test_table1_Emerging <- rbind(Test_table1_Emerging, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_Emerging <- rbind(Test_table2_Emerging, tidy(phtest(fixed,random)))
+rm(random, fixed, x, pooled)
+```
+
+### model 5
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ lag(log(FDI)) + lag(log(FDI), 2) + GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx
+
+fixed <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = Emerging_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  Emerging_model5 <- random} else{
+    Emerging_model5 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(Emerging_model5)
+
+# Fixed effects test
+Test_table1_Emerging <- rbind(Test_table1_Emerging, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_Emerging <- rbind(Test_table2_Emerging, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### Panel Summary
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(Emerging_model1, Emerging_model2, Emerging_model3, Emerging_model4, Emerging_model5,
+          dv.labels = c("Model 1", "Model 2", "Model 3", "Model 4", "Model 5"),
+          pred.labels = var_labels,
+          show.ci = FALSE,
+          p.style = "stars")
+```
+
+## XGBoost
+
+### Sampling
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+sample = sample.split(Emerging_data$num, SplitRatio = .8)
+Emerging_train = subset(Emerging_data, sample == TRUE)
+Emerging_test  = subset(Emerging_data, sample == FALSE)
+dim(Emerging_train)
+dim(Emerging_test)
+```
+
+### Training 
+
+Process starts with min_child_weight spectrum: c(10, 25, 50, 100, 150, 200, 500, 1000) and then respectively max_depth = seq(4,8,1); colsample_bytree = seq(0.1, 1, 0.1); subsample = c(0.6, 0.7, 0.75, 0.8, 0.85, 0.9); nrounds = seq(10,80,10).
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + P_rights + Civil_liberties
+
+parameters_xgb <- expand.grid(nrounds = 50,
+                             max_depth = 6,
+                             eta = 0.25, 
+                             gamma = 1,
+                             colsample_bytree = 1,
+                             min_child_weight = 10,
+                             subsample = 0.75)
+ctrl_cv3 <- trainControl(method = "cv", 
+                         number = 3)
+
+set.seed(123456789)
+FDI.xgb <- caret::train(formula,
+                     data = Emerging_train,
+                     method = "xgbTree",
+                     trControl = ctrl_cv3,
+                     tuneGrid  = parameters_xgb,
+                     tuneLength = 10)
+FDI.xgb
+
+```
+
+### Model
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+set.seed(123456789)
+
+y_var <-  "FDI"
+dataX <- as.matrix(cbind(Emerging_train[,c(1:4,13)], as.numeric(Emerging_train$Exe_clust)))
+colnames(dataX) <- c("GDP_growth","GDP_p_capita_log","Pop_log", "Trade_op_log","Party_institut_idx","Exe_clust")
+
+param_list <- list(objective = "reg:squarederror",  # For regression
+                   eta = 0.05,
+                   max_depth = 6,
+                   gamma = 0,
+                   colsample_bytree = 0.8,
+                   min_child_weight = 10,
+                   subsample = 0.6
+                   )
+
+mod <- xgboost::xgboost(data = dataX, 
+                        label = as.matrix(Emerging_train[[y_var]]), 
+                        params = param_list, nrounds = 100)
+```
+
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+shap_values <- shap.values(xgb_model = mod, X_train = dataX)
+shap_values$mean_shap_score
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+shap_data <- copy(shap_values$shap_score)
+shap_data[, BIAS := shap_values$BIAS0]
+pred_mod <- predict(mod, dataX, ntreelimit = 10)
+shap_data[, `:=`(rowSum = round(rowSums(shap_data),6), pred_mod = round(pred_mod,6))]
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# To prepare the long-format data:
+shap_long <- shap.prep(xgb_model = mod, X_train = dataX)
+
+# **SHAP summary plot**
+shap.plot.summary(shap_long)
+
+plot_shap <- cbind(Emerging_data$Party_institut_idx, shap_values$shap_score$Party_institut_idx)
+colnames(plot_shap) <- c("Party_institut_idx", "Shap_score")
+ggplot(as.data.frame(plot_shap),  aes(Party_institut_idx, Shap_score, color=Party_institut_idx)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title="SHAP Plot - Emerging Countries",
+       x="Party_institut_idx", y = "Shap_score") +
+  theme_minimal()
+
+plot_shap <- cbind(Emerging_data$Exe_clust,
+                   shap_values$shap_score$Exe_clust)
+colnames(plot_shap) <- c("Exe_clust", "Shap_score")
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+plot_shap <- cbind(Emerging_data$Exe_clust,
+                   shap_values$shap_score$Exe_clust,
+                   Emerging_data$Exe_respect_constitution)
+colnames(plot_shap) <- c("Exe_clust", "Shap_score", "Exe_respect_constitution")
+
+ggplot(as.data.frame(plot_shap),  aes(Exe_respect_constitution, Shap_score, color=Exe_respect_constitution, shape=ordered(Exe_clust, c("3","2", "1")))) +
+  geom_point() +
+  geom_smooth() +
+  labs(title="SHAP Plot - Emerging Countries",
+       x="Exe_clust", y = "Shap_score") +
+  theme_minimal() -> p
+p3 <- ggMarginal(p, type="boxplot")
+p3 
+```
+
+
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# choose to show top 4 features by setting `top_n = 6`, 
+# set 4 clustering groups of observations.  
+plot_data <- shap.prep.stack.data(shap_contrib = shap_values$shap_score, top_n = 6, n_groups = 4)
+# you may choose to zoom in at a location, and set y-axis limit using `y_parent_limit`  
+shap.plot.force_plot(plot_data, zoom_in_location = 300)
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+shap.plot.force_plot_bygroup(plot_data)
+```
+
+# Low-Income
+
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+variables <- c("GDP_growth", "GDP_p_capita_log", "Pop_log", "P_rights", "Trade_op_log", "FDI", "Exe_respect_constitution", "Civil_liberties", "RuleOfLaw", "Year", "Party_institut_idx")
+#LowIncome_data <- filter(LowIncome_data, Country != "Liberia")
+LowIncome_data %>% select(variables, Country) %>% data.frame() %>% drop_na()  -> stat_data
+stat_data$FDI <- stat_data$FDI
+stat_data %>% group_by(Country) %>%
+  select(FDI, Year) %>%
+  summarise(Min = round(min(FDI),2),
+            '1st Qu.' = round(quantile(FDI, 0.25),2),
+            Median = round(median(FDI),2),
+            Mean = round(mean(FDI),2),
+            '3rd Qu.' = round(quantile(FDI, 0.75),2),
+            Max = round(max(FDI),2),
+            Std = round(sd(FDI),2),
+            Count = n(),
+            'Years (Min-Max)'= paste0(as.character(min(Year)), "-",as.character(max(Year)))) -> FDI_stats
+FDI_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table8.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+FDI_stats %>%
+  mutate(Country = reorder(Country, Max)) %>%
+  ggplot() +
+  geom_segment( aes(x=Country, xend=Country, y=Min, yend=Max), color="grey") +
+  geom_point( aes(x=Country, y=Min), color=rgb(0.2,0.7,0.1,0.5), size=3 ) +
+  geom_point( aes(x=Country, y=Max), color=rgb(0.7,0.2,0.1,0.5), size=3 ) +
+  coord_flip()+
+  theme_ipsum() +
+  theme(
+    legend.position = "none",
+  ) +
+  xlab("") +
+  ylab("Share of FDI in GDP")+
+  scale_y_continuous(breaks=c(seq(0, 1,0.2)))+
+  theme_minimal()
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+data_corr <- LowIncome_data %>% select(variables) %>% select(-Year) %>% drop_na()
+nums <- unlist(lapply(data_corr, is.numeric))  
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+M <- data_corr[, nums]
+colnames(M) <- c("GDP growth rate", "log(GDP per capita)","log(Population)","Property rights","log(Trade openness)","FDI", "Executive respects constitution","Civil Liberties","Rule of Law","Party institutionalization index")
+res <- cor(M)
+p.mat <- cor.mtest(M)
+
+
+png('corr_plot3.png', width = 880, height = 880)
+
+corrplot(res, is.corr = FALSE, method="color", col=col(200),
+         type="upper", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         p.mat = p.mat, sig.level = c(0.01), insig = 'blank', 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+
+dev.off()
+```
+
+## Panel Model
+
+### Exe_respect_constitution Clustering
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+Data_LowIncome_clust <- LowIncome_data %>% select(c(Exe_respect_constitution)) %>% scale()
+
+fviz_nbclust(Data_LowIncome_clust, FUNcluster=kmeans, method = "silhouette") + theme_minimal()
+fviz_nbclust(Data_LowIncome_clust, FUNcluster=kmeans, method = "wss") + theme_minimal()
+fviz_nbclust(Data_LowIncome_clust, FUNcluster=kmeans, method = "gap_stat") + theme_minimal()
+
+my_vector <- vector("numeric", 10L)
+for(i in 2:10) {
+  clusters1<-kmeans(Data_LowIncome_clust, 3) 
+  my_vector[i] <- round(calinhara(Data_LowIncome_clust,clusters1$cluster),digits=2)
+}
+ggplot(data_frame(my_vector), aes(x=seq(1,10,1), y=my_vector)) +
+  geom_line() +
+  labs(title="Optimal number of clusters",
+       x="Number of clusters k", y = "Calinski-Harabasz Index") + 
+  geom_vline(xintercept = 3, linetype="dotted", color = "blue") + 
+  scale_x_discrete(limits=seq(1,10,1)) +
+  theme_minimal()  
+
+clusters1<-kmeans(Data_LowIncome_clust, 3) # 3 clusters final
+
+LowIncome_data$Exe_clust<-rep(0, times=dim(LowIncome_data)[1])
+LowIncome_data$Exe_clust[clusters1$cluster==1]<-1
+LowIncome_data$Exe_clust[clusters1$cluster==2]<-2
+LowIncome_data$Exe_clust[clusters1$cluster==3]<-3
+
+clusters_stats <- cbind(LowIncome_data$Exe_respect_constitution[clusters1$cluster==1],
+                        LowIncome_data$Exe_respect_constitution[clusters1$cluster==2],
+                        LowIncome_data$Exe_respect_constitution[clusters1$cluster==3])
+colnames(clusters_stats) <- c("Cluster 1", "Cluster 2", "Cluster 3")
+summary(clusters_stats)
+LowIncome_data$Exe_clust <- ordered(LowIncome_data$Exe_clust, c("2","3", "1"))
+
+plot_cluster <- cbind(LowIncome_data$Exe_respect_constitution, clusters1$cluster)
+colnames(plot_cluster) <- c("Exe_respect_constitution", "Cluster")
+
+ggplot(as.data.frame(plot_cluster),  aes(Exe_respect_constitution, Cluster, color=factor(Cluster))) +
+  geom_point() +
+  labs(title="Clusters Plot - Low-Income Countries",
+       x="Exe_respect_constitution", y = "Cluster's No.") +
+  scale_y_discrete(limits=seq(1,3,1)) +
+  theme_minimal() +
+  theme(legend.position = "none")
+table(LowIncome_data$Exe_clust)
+```
+
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+as.data.frame(LowIncome_data) %>% mutate(Cluster = Exe_clust) %>%
+  group_by(Cluster) %>%
+  summarise(Min = round(min(Exe_respect_constitution),4),
+            '1st Qu.' = round(quantile(Exe_respect_constitution, 0.25),4),
+            Median = round(median(Exe_respect_constitution),4),
+            Mean = round(mean(Exe_respect_constitution),4),
+            '3rd Qu.' = round(quantile(Exe_respect_constitution, 0.75),4),
+            Max = round(max(Exe_respect_constitution),4),
+            Std = round(sd(Exe_respect_constitution),4),
+            Count = n()) -> Exe_stats
+Exe_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table3exe.html",
+             zoom = 2)
+```
+
+### model 1
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + P_rights
+
+fixed <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  LowIncome_model1 <- random} else{
+    LowIncome_model1 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(LowIncome_model1)
+
+# Fixed effects test
+Test_table1_LowIncome <- tidy(pFtest(fixed, pooled))
+# Hausman Test
+Test_table2_LowIncome <- tidy(phtest(fixed,random))
+
+rm(random, fixed, x, pooled)   
+```
+
+### model 2
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + Exe_clust
+
+fixed <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  LowIncome_model2 <- random} else{
+    LowIncome_model2 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(LowIncome_model2)
+
+# Fixed effects test
+Test_table1_LowIncome <- rbind(Test_table1_LowIncome, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_LowIncome <- rbind(Test_table2_LowIncome, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### model 3
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + RuleOfLaw + Party_institut_idx
+
+fixed <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  LowIncome_model3 <- random} else{
+    LowIncome_model3 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(LowIncome_model3)
+
+# Fixed effects test
+Test_table1_LowIncome <- rbind(Test_table1_LowIncome, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_LowIncome <- rbind(Test_table2_LowIncome, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### model 4
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Civil_liberties + Party_institut_idx
+
+fixed <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  LowIncome_model4 <- random} else{
+    LowIncome_model4 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(LowIncome_model4)
+
+# Fixed effects test
+Test_table1_LowIncome <- rbind(Test_table1_LowIncome, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_LowIncome <- rbind(Test_table2_LowIncome, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### model 5
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+formula <- log(FDI) ~ lag(log(FDI)) + lag(log(FDI), 2) + GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx
+
+fixed <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "within")
+random <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "random")
+pooled <- plm(formula, data = LowIncome_data, index = c("Country", "Year"), model = "pooling")
+
+x <- phtest(fixed,random)
+x <- x[["p.value"]]
+
+if (x>=0.05) {
+  LowIncome_model5 <- random} else{
+    LowIncome_model5 <- fixed
+  }# if pvalue <= 0,05 : H0:random is ejected - we use fixed effects (Hausman 1978)
+summary(LowIncome_model5)
+
+# Fixed effects test
+Test_table1_LowIncome <- rbind(Test_table1_LowIncome, tidy(pFtest(fixed, pooled)))
+# Hausman Test
+Test_table2_LowIncome <- rbind(Test_table2_LowIncome, tidy(phtest(fixed,random)))
+
+rm(random, fixed, x, pooled)
+```
+
+### Panel Summary
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+tab_model(LowIncome_model1, LowIncome_model2, LowIncome_model3, LowIncome_model4, LowIncome_model5,
+          dv.labels = c("Model 1", "Model 2", "Model 3", "Model 4", "Model 5"),
+          pred.labels = var_labels,
+          show.ci = FALSE,
+          p.style = "stars")
+```
+
+## XGBoost
+
+### Sampling
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+sample = sample.split(LowIncome_data$num, SplitRatio = .8)
+LowIncome_train = subset(LowIncome_data, sample == TRUE)
+LowIncome_test  = subset(LowIncome_data, sample == FALSE)
+dim(LowIncome_train)
+dim(LowIncome_test)
+```
+
+### Model
+
+```{r message=FALSE, warning=FALSE, results='hide'}
+set.seed(123456789)
+
+y_var <-  "FDI"
+dataX <- as.matrix(cbind(LowIncome_data[,c(1:4,13)], as.numeric(LowIncome_data$Exe_clust)))
+colnames(dataX) <- c("GDP growth rate","log(GDP per capita)","log(Population)", "log(Trade openness)","Party institutionalization index","Executive respects constitution")
+
+param_list <- list(objective = "reg:squarederror",  # For regression
+                   eta = 0.05,
+                   max_depth = 6,
+                   gamma = 0,
+                   colsample_bytree = 0.8,
+                   min_child_weight = 10,
+                   subsample = 0.6
+                   )
+
+mod <- xgboost::xgboost(data = dataX, 
+                        label = as.matrix(LowIncome_data[[y_var]]), 
+                        params = param_list, nrounds = 100)
+```
+
+
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+RSQUARE = function(y_actual,y_predict){
+  cor(y_actual,y_predict)^2
+}
+MAPE = function(y_actual,y_predict){
+  mean(abs((y_actual-y_predict)/y_actual))*100
+}
+
+print("R-squared for train data:")
+RSQUARE(LowIncome_data[[y_var]], predict(mod,dataX))
+#print("R-squared for test data:")
+#RSQUARE(LowIncome_test[[y_var]], predict(mod, dataXtest))
+print("MAPE for train data:")
+MAPE(LowIncome_data[[y_var]], predict(mod, dataX))
+#print("MAPE for test data:")
+#MAPE(LowIncome_test[[y_var]], predict(mod, dataXtest))
+```
+
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+shap_values <- shap.values(xgb_model = mod, X_train = dataX)
+shap_values$mean_shap_score %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table9.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+shap_data <- copy(shap_values$shap_score)
+shap_data[, BIAS := shap_values$BIAS0]
+pred_mod <- predict(mod, dataX, ntreelimit = 10)
+shap_data[, `:=`(rowSum = round(rowSums(shap_data),6), pred_mod = round(pred_mod,6))]
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# To prepare the long-format data:
+shap_long <- shap.prep(xgb_model = mod, X_train = dataX)
+
+# **SHAP summary plot**
+shap.plot.summary(shap_long)
+
+plot_shap <- cbind(LowIncome_data$Party_institut_idx, shap_values$shap_score$`Party institutionalization index`)
+colnames(plot_shap) <- c("Party institutionalization index", "Shap_score")
+ggplot(as.data.frame(plot_shap),  aes(`Party institutionalization index`, Shap_score, color=`Party institutionalization index`)) +
+  geom_point() +
+  geom_smooth() +
+  labs(x="Party institutionalization index", y = "Shap score") +
+  theme_minimal()
+```
+
+
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+plot_shap <- cbind(LowIncome_data$Exe_clust,
+                   shap_values$shap_score$`Executive respects constitution`,
+                   LowIncome_data$Exe_respect_constitution)
+colnames(plot_shap) <- c("Exe_clust", "Shap_score", "Exe_respect_constitution")
+
+ggplot(as.data.frame(plot_shap),  aes(Exe_respect_constitution, Shap_score, color=Exe_respect_constitution, shape=ordered(Exe_clust, c("3","2", "1")))) +
+  geom_point() +
+  geom_smooth() +
+  labs(x="Executive respects constitution", y = "Shap score",color="Executive respects constitution", shape="Cluster") +
+  theme_minimal() -> p
+p3 <- ggMarginal(p, type="boxplot")
+p3
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+as.data.frame(plot_shap) %>% mutate(Cluster = Exe_clust) %>%
+  group_by(Cluster) %>%
+  summarise(Min = round(min(Shap_score),4),
+            '1st Qu.' = round(quantile(Shap_score, 0.25),4),
+            Median = round(median(Shap_score),4),
+            Mean = round(mean(Shap_score),4),
+            '3rd Qu.' = round(quantile(Shap_score, 0.75),4),
+            Max = round(max(Shap_score),4),
+            Std = round(sd(Shap_score),4),
+            Count = n()) -> Shap_score_stats
+Shap_score_stats %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table10.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# choose to show top 4 features by setting `top_n = 6`, 
+# set 4 clustering groups of observations.  
+plot_data <- shap.prep.stack.data(shap_contrib = shap_values$shap_score, top_n = 6, n_groups = 4)
+# you may choose to zoom in at a location, and set y-axis limit using `y_parent_limit`  
+shap.plot.force_plot(plot_data, zoom_in_location = 300)
+```
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+shap.plot.force_plot_bygroup(plot_data)
+```
+
+# Panel Diagnostics
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# 1. F test for individual effects
+# If the p-value is < 0.05 then the fixed effects model is a better choice
+Test_table1_Advanced$Model <- c("Advanced Markets 1", "Advanced Markets 2", "Advanced Markets 3", "Advanced Markets 4", "Advanced Markets 5")
+
+Test_table1_Emerging$Model <- c("Emerging Markets 1", "Emerging Markets 2", "Emerging Markets 3", "Emerging Markets 4", "Emerging Markets 5")
+
+Test_table1_LowIncome$Model <- c("Low-Income Markets 1", "Low-Income Markets 2", "Low-Income Markets 3", "Low-Income Markets 4", "Low-Income Markets 5")
+
+
+rbind(Test_table1_Advanced,Test_table1_Emerging,Test_table1_LowIncome) %>% select(c(Model, method, statistic, p.value, alternative))  %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table1d.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# 2. Hausman Test
+Test_table2_Advanced$Model <- c("Advanced Markets 1", "Advanced Markets 2", "Advanced Markets 3", "Advanced Markets 4", "Advanced Markets 5")
+Test_table2_Emerging$Model <- c("Emerging Markets 1", "Emerging Markets 2", "Emerging Markets 3", "Emerging Markets 4", "Emerging Markets 5")
+Test_table2_LowIncome$Model <- c("Low-Income Markets 1", "Low-Income Markets 2", "Low-Income Markets 3", "Low-Income Markets 4", "Low-Income Markets 5")
+
+rbind(Test_table2_Advanced,Test_table2_Emerging,Test_table2_LowIncome) %>% select(c(Model, method, statistic, p.value, alternative)) %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table2d.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# 3. Breusch-Godfrey/Wooldridge test for serial correlation in panel models
+# Advanced
+Test_table3_Advanced <- tidy(pbgtest(Advanced_model1))
+Test_table3_Advanced <- rbind(Test_table3_Advanced, tidy(pbgtest(Advanced_model2)))
+Test_table3_Advanced <- rbind(Test_table3_Advanced, tidy(pbgtest(Advanced_model3)))
+Test_table3_Advanced <- rbind(Test_table3_Advanced, tidy(pbgtest(Advanced_model4)))
+Test_table3_Advanced <- rbind(Test_table3_Advanced, tidy(pbgtest(Advanced_model5)))
+Test_table3_Advanced$Model <- c("Advanced Markets 1", "Advanced Markets 2", "Advanced Markets 3", "Advanced Markets 4", "Advanced Markets 5")
+
+# Emerging
+Test_table3_Emerging <- tidy(pbgtest(Emerging_model1))
+Test_table3_Emerging <- rbind(Test_table3_Emerging, tidy(pbgtest(Emerging_model2)))
+Test_table3_Emerging <- rbind(Test_table3_Emerging, tidy(pbgtest(Emerging_model3)))
+Test_table3_Emerging <- rbind(Test_table3_Emerging, tidy(pbgtest(Emerging_model4)))
+Test_table3_Emerging <- rbind(Test_table3_Emerging, tidy(pbgtest(Emerging_model5)))
+Test_table3_Emerging$Model <- c("Emerging Markets 1", "Emerging Markets 2", "Emerging Markets 3", "Emerging Markets 4", "Emerging Markets 5")
+
+# Low-income
+Test_table3_Lowincome <- tidy(pbgtest(LowIncome_model1))
+Test_table3_Lowincome <- rbind(Test_table3_Lowincome, tidy(pbgtest(LowIncome_model2)))
+Test_table3_Lowincome <- rbind(Test_table3_Lowincome, tidy(pbgtest(LowIncome_model3)))
+Test_table3_Lowincome <- rbind(Test_table3_Lowincome, tidy(pbgtest(LowIncome_model4)))
+Test_table3_Lowincome <- rbind(Test_table3_Lowincome, tidy(pbgtest(LowIncome_model5)))
+Test_table3_Lowincome$Model <- c("Low-Income Markets 1", "Low-Income Markets 2", "Low-Income Markets 3", "Low-Income Markets 4", "Low-Income Markets 5")
+rbind(Test_table3_Advanced,Test_table3_Emerging,Test_table3_Lowincome) %>% select(c(Model,method, statistic, p.value, alternative)) %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table3d.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# 4. studentized Breusch-Pagan test
+# H0: homoscedasticity
+# H1: heteroscedasticity
+# Advanced
+Test_table4_Advanced <- tidy(bptest(Advanced_model1))
+Test_table4_Advanced <- rbind(Test_table4_Advanced, tidy(bptest(Advanced_model2)))
+Test_table4_Advanced <- rbind(Test_table4_Advanced, tidy(bptest(Advanced_model3)))
+Test_table4_Advanced <- rbind(Test_table4_Advanced, tidy(bptest(Advanced_model4)))
+Test_table4_Advanced <- rbind(Test_table4_Advanced, tidy(bptest(Advanced_model5)))
+Test_table4_Advanced$Model <- c("Advanced Markets 1", "Advanced Markets 2", "Advanced Markets 4", "Advanced Markets 4", "Advanced Markets 5")
+Test_table4_Advanced$alternative <- rep("heteroscedasticity",5)
+# Emerging
+Test_table4_Emerging <- tidy(bptest(Emerging_model1))
+Test_table4_Emerging <- rbind(Test_table4_Emerging, tidy(bptest(Emerging_model2)))
+Test_table4_Emerging <- rbind(Test_table4_Emerging, tidy(bptest(Emerging_model3)))
+Test_table4_Emerging <- rbind(Test_table4_Emerging, tidy(bptest(Emerging_model4)))
+Test_table4_Emerging <- rbind(Test_table4_Emerging, tidy(bptest(Emerging_model5)))
+Test_table4_Emerging$Model <- c("Emerging Markets 1", "Emerging Markets 2", "Emerging Markets 4", "Emerging Markets 4", "Emerging Markets 5")
+Test_table4_Emerging$alternative <- rep("heteroscedasticity",5)
+# Low-income
+Test_table4_Lowincome <- tidy(bptest(LowIncome_model1))
+Test_table4_Lowincome <- rbind(Test_table4_Lowincome, tidy(bptest(LowIncome_model2)))
+Test_table4_Lowincome <- rbind(Test_table4_Lowincome, tidy(bptest(LowIncome_model3)))
+Test_table4_Lowincome <- rbind(Test_table4_Lowincome, tidy(bptest(LowIncome_model4)))
+Test_table4_Lowincome <- rbind(Test_table4_Lowincome, tidy(bptest(LowIncome_model5)))
+Test_table4_Lowincome$Model <- c("Low-Income Markets 1", "Low-Income Markets 2", "Low-Income Markets 4", "Low-Income Markets 4", "Low-Income Markets 5")
+Test_table4_Lowincome$alternative <- rep("heteroscedasticity",5)
+rbind(Test_table4_Advanced,Test_table4_Emerging,Test_table4_Lowincome) %>% select(c(Model,method, statistic, p.value,alternative)) %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table4d.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# 5. Balance test
+#It gives the measures γ and ν from Ahrens and Pincus (1981) where for both 1 represents balanced data and the more unbalanced the data the lower the value.
+# Advanced
+Test_table5_Advanced <- tidy(punbalancedness(Advanced_model1))
+Test_table5_Advanced <- cbind(Test_table5_Advanced, tidy(punbalancedness(Advanced_model2))[,2])
+Test_table5_Advanced <- cbind(Test_table5_Advanced, tidy(punbalancedness(Advanced_model3))[,2])
+Test_table5_Advanced <- cbind(Test_table5_Advanced, tidy(punbalancedness(Advanced_model4))[,2])
+Test_table5_Advanced <- cbind(Test_table5_Advanced, tidy(punbalancedness(Advanced_model5))[,2])
+colnames(Test_table5_Advanced) <- c("Par", "Advanced Markets 1", "Advanced Markets 2", "Advanced Markets 3", "Advanced Markets 4", "Advanced Markets 5")
+Test_table5_Advanced %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table5d1.html",
+             zoom = 2)
+# Emerging
+Test_table5_Emerging <- tidy(punbalancedness(Emerging_model1))
+Test_table5_Emerging <- cbind(Test_table5_Emerging, tidy(punbalancedness(Emerging_model2))[,2])
+Test_table5_Emerging <- cbind(Test_table5_Emerging, tidy(punbalancedness(Emerging_model3))[,2])
+Test_table5_Emerging <- cbind(Test_table5_Emerging, tidy(punbalancedness(Emerging_model4))[,2])
+Test_table5_Emerging <- cbind(Test_table5_Emerging, tidy(punbalancedness(Emerging_model5))[,2])
+colnames(Test_table5_Emerging) <- c("Par", "Emerging Markets 1", "Emerging Markets 2", "Emerging Markets 3", "Emerging Markets 4", "Emerging Markets 5")
+Test_table5_Emerging %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table5d2.html",
+             zoom = 2)
+# Low-income
+Test_table5_Lowincome <- tidy(punbalancedness(LowIncome_model1))
+Test_table5_Lowincome <- cbind(Test_table5_Lowincome, tidy(punbalancedness(LowIncome_model2))[,2])
+Test_table5_Lowincome <- cbind(Test_table5_Lowincome, tidy(punbalancedness(LowIncome_model3))[,2])
+Test_table5_Lowincome <- cbind(Test_table5_Lowincome, tidy(punbalancedness(LowIncome_model4))[,2])
+Test_table5_Lowincome <- cbind(Test_table5_Lowincome, tidy(punbalancedness(LowIncome_model5))[,2])
+colnames(Test_table5_Lowincome) <- c("Par", "Low-Income Markets 1", "Low-Income Markets 2", "Low-Income Markets 3", "Low-Income Markets 4", "Low-Income Markets 5")
+Test_table5_Lowincome %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table5d3.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# 6. Tests for cross-sectional dependence
+#According to Baltagi, cross-sectional dependence is a problem in macro panels with long time series. This is not much of a problem in micro panels (few years and large number of cases).
+#The null hypothesis in the B-P/LM and Pasaran CD tests of independence is that residuals across entities are not correlated. B-P/LM and Pasaran CD (cross-sectional dependence) tests are used to test whether the residuals are correlated across entities*. Cross-sectional dependence can lead to bias in tests results (also called contemporaneous correlation).
+# Advanced
+Test_table6_Advanced <- tidy(pcdtest(Advanced_model1, test = c("lm")))
+Test_table6_Advanced <- rbind(Test_table6_Advanced, tidy(pcdtest(Advanced_model2, test = c("lm"))))
+Test_table6_Advanced <- rbind(Test_table6_Advanced, tidy(pcdtest(Advanced_model3, test = c("lm"))))
+Test_table6_Advanced <- rbind(Test_table6_Advanced, tidy(pcdtest(Advanced_model4, test = c("lm"))))
+Test_table6_Advanced <- rbind(Test_table6_Advanced, tidy(pcdtest(Advanced_model5, test = c("lm"))))
+Test_table6_Advanced$Model <- c("Advanced Markets 1", "Advanced Markets 2", "Advanced Markets 3", "Advanced Markets 4", "Advanced Markets 5")
+
+# Emerging
+Test_table6_Emerging <- tidy(pcdtest(Emerging_model1, test = c("lm")))
+Test_table6_Emerging <- rbind(Test_table6_Emerging, tidy(pcdtest(Emerging_model2, test = c("lm"))))
+Test_table6_Emerging <- rbind(Test_table6_Emerging, tidy(pcdtest(Emerging_model3, test = c("lm"))))
+Test_table6_Emerging <- rbind(Test_table6_Emerging, tidy(pcdtest(Emerging_model4, test = c("lm"))))
+Test_table6_Emerging <- rbind(Test_table6_Emerging, tidy(pcdtest(Emerging_model5, test = c("lm"))))
+Test_table6_Emerging$Model <- c("Emerging Markets 1", "Emerging Markets 2", "Emerging Markets 3", "Emerging Markets 4", "Emerging Markets 5")
+
+# Low-income
+Test_table6_Lowincome <- tidy(pcdtest(LowIncome_model1, test = c("lm")))
+Test_table6_Lowincome <- rbind(Test_table6_Lowincome, tidy(pcdtest(LowIncome_model2, test = c("lm"))))
+Test_table6_Lowincome <- rbind(Test_table6_Lowincome, tidy(pcdtest(LowIncome_model3, test = c("lm"))))
+Test_table6_Lowincome <- rbind(Test_table6_Lowincome, tidy(pcdtest(LowIncome_model4, test = c("lm"))))
+Test_table6_Lowincome <- rbind(Test_table6_Lowincome, tidy(pcdtest(LowIncome_model5, test = c("lm"))))
+Test_table6_Lowincome$Model <- c("Low-Income Markets 1", "Low-Income Markets 2", "Low-Income Markets 3", "Low-Income Markets 4", "Low-Income Markets 5")
+rbind(Test_table6_Advanced,Test_table6_Emerging,Test_table6_Lowincome) %>% select(c(Model,method, statistic, p.value, alternative)) %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table6d.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+Test_table7_Advanced <- tidy(pcdtest(Advanced_model1, test = c("cd")))
+Test_table7_Advanced <- rbind(Test_table7_Advanced, tidy(pcdtest(Advanced_model2, test = c("cd"))))
+Test_table7_Advanced <- rbind(Test_table7_Advanced, tidy(pcdtest(Advanced_model3, test = c("cd"))))
+Test_table7_Advanced <- rbind(Test_table7_Advanced, tidy(pcdtest(Advanced_model4, test = c("cd"))))
+Test_table7_Advanced <- rbind(Test_table7_Advanced, tidy(pcdtest(Advanced_model5, test = c("cd"))))
+Test_table7_Advanced$Model <- c("Advanced Markets 1", "Advanced Markets 2", "Advanced Markets 3", "Advanced Markets 4", "Advanced Markets 5")
+
+# Emerging
+Test_table7_Emerging <- tidy(pcdtest(Emerging_model1, test = c("cd")))
+Test_table7_Emerging <- rbind(Test_table7_Emerging, tidy(pcdtest(Emerging_model2, test = c("cd"))))
+Test_table7_Emerging <- rbind(Test_table7_Emerging, tidy(pcdtest(Emerging_model3, test = c("cd"))))
+Test_table7_Emerging <- rbind(Test_table7_Emerging, tidy(pcdtest(Emerging_model4, test = c("cd"))))
+Test_table7_Emerging <- rbind(Test_table7_Emerging, tidy(pcdtest(Emerging_model5, test = c("cd"))))
+Test_table7_Emerging$Model <- c("Emerging Markets 1", "Emerging Markets 2", "Emerging Markets 3", "Emerging Markets 4", "Emerging Markets 5")
+
+# Low-income
+Test_table7_Lowincome <- tidy(pcdtest(LowIncome_model1, test = c("cd")))
+Test_table7_Lowincome <- rbind(Test_table7_Lowincome, tidy(pcdtest(LowIncome_model2, test = c("cd"))))
+Test_table7_Lowincome <- rbind(Test_table7_Lowincome, tidy(pcdtest(LowIncome_model3, test = c("cd"))))
+Test_table7_Lowincome <- rbind(Test_table7_Lowincome, tidy(pcdtest(LowIncome_model4, test = c("cd"))))
+Test_table7_Lowincome <- rbind(Test_table7_Lowincome, tidy(pcdtest(LowIncome_model5, test = c("cd"))))
+Test_table7_Lowincome$Model <- c("Low-Income Markets 1", "Low-Income Markets 2", "Low-Income Markets 3", "Low-Income Markets 4", "Low-Income Markets 5")
+rbind(Test_table7_Advanced,Test_table7_Emerging,Test_table7_Lowincome) %>% select(c(Model,method, statistic, p.value, alternative)) %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table7d.html",
+             zoom = 2)
+```
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+# 8. Stationarity - Augmented Dickey-Fuller Test
+# Advanced
+Panel.set <- plm.data(Advanced_data, index = c("Country", "Year"))
+Stationarity_test <- tidy(adf.test(Panel.set$FDI, k=2))
+# Emerging
+Panel.set <- plm.data(Emerging_data, index = c("Country", "Year"))
+Stationarity_test <- rbind(Stationarity_test, tidy(adf.test(Panel.set$FDI, k=2)))
+# Low Income
+Panel.set <- plm.data(LowIncome_data)
+Stationarity_test <- rbind(Stationarity_test, tidy(adf.test(Panel.set$FDI, k=2)))
+Stationarity_test$Data <- c("Advanced", "Emerging", "Low-Income")
+Stationarity_test %>% select(c(Data, method, statistic, p.value, alternative)) %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table8d.html",
+             zoom = 2)
+```
+
+# temp
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + P_rights
+DW_test <- tidy(dwtest(formula, data = Advanced_data))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + Exe_clust
+DW_test <- rbind(DW_test, tidy(dwtest(formula, data = Advanced_data)))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + RuleOfLaw + Party_institut_idx
+DW_test <- rbind(DW_test, tidy(dwtest(formula, data = Advanced_data)))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Civil_liberties + Party_institut_idx
+DW_test <- rbind(DW_test, tidy(dwtest(formula, data = Advanced_data)))
+formula <- log(FDI) ~ lag(log(FDI)) + lag(log(FDI), 2) + GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx
+DW_test <- rbind(DW_test, tidy(dwtest(formula, data = Advanced_data)))
+DW_test$Model <- c("Advanced Markets 1", "Advanced Markets 2", "Advanced Markets 3", "Advanced Markets 4", "Advanced Markets 5")
+
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + P_rights
+DW_test2 <- tidy(dwtest(formula, data = Emerging_data))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + Exe_clust
+DW_test2 <- rbind(DW_test2, tidy(dwtest(formula, data = Emerging_data)))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + RuleOfLaw + Party_institut_idx
+DW_test2 <- rbind(DW_test2, tidy(dwtest(formula, data = Emerging_data)))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Civil_liberties + Party_institut_idx
+DW_test2 <- rbind(DW_test2, tidy(dwtest(formula, data = Emerging_data)))
+formula <- log(FDI) ~ lag(log(FDI)) + lag(log(FDI), 2) + GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx
+DW_test2 <- rbind(DW_test2, tidy(dwtest(formula, data = Emerging_data)))
+DW_test2$Model <- c("Emerging Markets 1", "Emerging Markets 2", "Emerging Markets 3", "Emerging Markets 4", "Emerging Markets 5")
+
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + P_rights
+DW_test3 <- tidy(dwtest(formula, data = LowIncome_data))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx + Exe_clust
+DW_test3 <- rbind(DW_test3, tidy(dwtest(formula, data = LowIncome_data)))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + RuleOfLaw + Party_institut_idx
+DW_test3 <- rbind(DW_test3, tidy(dwtest(formula, data = LowIncome_data)))
+formula <- log(FDI) ~ GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Civil_liberties + Party_institut_idx
+DW_test3 <- rbind(DW_test3, tidy(dwtest(formula, data = LowIncome_data)))
+formula <- log(FDI) ~ lag(log(FDI)) + lag(log(FDI), 2) + GDP_growth + GDP_p_capita_log + Pop_log + Trade_op_log + Party_institut_idx
+DW_test3 <- rbind(DW_test3, tidy(dwtest(formula, data = LowIncome_data)))
+DW_test3$Model <- c("Low-Income Markets 1", "Low-Income Markets 2", "Low-Income Markets 3", "Low-Income Markets 4", "Low-Income Markets 5")
+
+rbind(DW_test,DW_test2,DW_test3) %>% select(c(Model,method, statistic, p.value, alternative)) %>% kable() %>% kable_styling()%>%
+  save_kable("tables/table11dw.html",
+             zoom = 2)
+
+# ACF test vis
+acf(Advanced_data$FDI)
+acf(Emerging_data$FDI)
+acf(LowIncome_data$FDI)
+```
+
+
+
+```{r message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# 4. Tests for individual and time effects
+#ols <-lm(formula, data = LowIncome_data)
+#pFtest(LowIncome_model1, ols)
+# 5. Tests for cross-sectional dependence
+#pcdtest(Advanced_model2, test = c("lm"))
+#pcdtest(LowIncome_model1, test = c("cd"))
+# 6. Stationarity
+#Panel.set <- plm.data(LowIncome_data, index = c("Country", "Year"))
+#adf.test(Panel.set$FDI, k=2)
+```
